@@ -9,19 +9,28 @@ Controls:
   Enter           Load the selected model
   /               Live search models
   s               Toggle sort (name/size)
+  o               Server options (switch/add/delete servers)
   u               Unload the current model
   q / Esc         Quit
+
+Server settings stored in ~/.config/lmsmc/config.yaml
 """
 
 import argparse
 import curses
+import os
 import time
 import urllib.request
 import urllib.error
 import json
+import yaml
+
+from pathlib import Path
 
 
 DEFAULT_HOST = "http://localhost:1234"
+CONFIG_DIR = Path.home() / ".config" / "lmsmc"
+CONFIG_FILE = CONFIG_DIR / "config.yaml"
 
 
 def api_get(base_url, path, timeout=5):
@@ -140,6 +149,196 @@ def format_size(model):
     return f"[{gb:.1f}GB]"
 
 
+def load_config():
+    """Load server list from config file."""
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE) as f:
+            return yaml.safe_load(f) or {}
+    return {"servers": [DEFAULT_HOST], "current_index": 0}
+
+
+def save_config(cfg):
+    """Save server list to config file."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_FILE, "w") as f:
+        yaml.dump(cfg, f, default_flow_style=False)
+
+
+def get_current_server(cfg):
+    """Return the currently selected server URL."""
+    idx = cfg.get("current_index", 0)
+    servers = cfg.get("servers", [DEFAULT_HOST])
+    if not servers:
+        return DEFAULT_HOST
+    return servers[min(idx, len(servers) - 1)]
+
+
+def server_options_screen(stdscr, cfg):
+    """Show server options screen: list servers, select, add new."""
+    servers = cfg.get("servers", [DEFAULT_HOST])
+    current_idx = cfg.get("current_index", 0)
+    selected = current_idx
+    status_msg = ""
+
+    def draw():
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+
+        header = " Server Options "
+        stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
+        stdscr.addnstr(0, 0, header.center(w), w - 1)
+        stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+
+        help_line = "[Up/Down] Select  [Enter] Use server  [a] Add  [d] Delete  [q] Back"
+        stdscr.attron(curses.color_pair(1))
+        stdscr.addnstr(h - 1, 0, help_line.center(w), w - 1)
+        stdscr.attroff(curses.color_pair(1))
+
+        if status_msg:
+            stdscr.attron(curses.color_pair(4))
+            stdscr.addnstr(h - 2, 0, f" {status_msg}", w - 1)
+            stdscr.attroff(curses.color_pair(4))
+
+        list_start = 2
+        list_height = h - list_start - 2
+        if status_msg:
+            list_height -= 1
+
+        if list_height > 0:
+            stdscr.addnstr(list_start - 1, 0, f" Servers ({len(servers)}):", w - 1)
+            for i in range(list_height):
+                if i >= len(servers):
+                    break
+                row = list_start + i
+                prefix = ">" if i == selected else " "
+                marker = " *" if i == current_idx else ""
+                line = f"{prefix} {servers[i]}{marker}"
+                if i == selected:
+                    stdscr.attron(curses.color_pair(5) | curses.A_BOLD)
+                stdscr.addnstr(row, 1, line[:w - 3], w - 3)
+                if i == selected:
+                    stdscr.attroff(curses.color_pair(5) | curses.A_BOLD)
+
+        stdscr.refresh()
+
+    def add_server():
+        nonlocal status_msg
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+
+        header = " Add Server "
+        stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
+        stdscr.addnstr(0, 0, header.center(w), w - 1)
+        stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+
+        prompt = " Address (e.g. 192.168.1.1): "
+        stdscr.addnstr(2, 1, prompt, w - 3)
+
+        port_prompt = " Port (default 1234): "
+        stdscr.addnstr(3, 1, port_prompt, w - 3)
+
+        help_line = "[Enter] Confirm  [Esc] Cancel"
+        stdscr.attron(curses.color_pair(1))
+        stdscr.addnstr(h - 1, 0, help_line.center(w), w - 1)
+        stdscr.attroff(curses.color_pair(1))
+
+        stdscr.refresh()
+
+        address = ""
+        port = ""
+        field = 0  # 0=address, 1=port
+
+        stdscr.nodelay(False)
+
+        while True:
+            # Redraw input fields
+            row = 2 if field == 0 else 3
+            col = len(prompt) if field == 0 else len(port_prompt)
+            current_text = address if field == 0 else port
+            stdscr.addnstr(row, col, current_text, w - col - 1)
+            stdscr.move(row, col + len(current_text))
+            stdscr.refresh()
+
+            ch = stdscr.getch()
+
+            if ch == 27:
+                return
+            elif ch in (10, 13):
+                if field == 0:
+                    field = 1
+                else:
+                    addr = address.strip()
+                    prt = port.strip() or "1234"
+                    if addr:
+                        url = f"http://{addr}:{prt}"
+                        if url not in servers:
+                            servers.append(url)
+                            cfg["current_index"] = len(servers) - 1
+                            status_msg = f"Added {url}"
+                        else:
+                            status_msg = "Server already in list"
+                    else:
+                        status_msg = "Address required"
+                    return
+            elif ch in (9, curses.KEY_DOWN):
+                if field == 0:
+                    field = 1
+            elif ch == curses.KEY_UP:
+                field = 0
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                if field == 0:
+                    address = address[:-1]
+                else:
+                    port = port[:-1]
+            elif 32 <= ch < 127:
+                if field == 0:
+                    address += chr(ch)
+                else:
+                    port += chr(ch)
+
+    draw()
+
+    while True:
+        stdscr.timeout(200)
+        ch = stdscr.getch()
+
+        if ch == ord("q") or ch == 27:
+            cfg["current_index"] = current_idx
+            save_config(cfg)
+            return
+        elif ch == ord("a"):
+            add_server()
+            draw()
+        elif ch == ord("d"):
+            if len(servers) > 1 and selected < len(servers):
+                removed = servers.pop(selected)
+                if selected >= len(servers):
+                    selected = len(servers) - 1
+                if current_idx >= len(servers):
+                    current_idx = len(servers) - 1
+                elif current_idx > selected:
+                    current_idx -= 1
+                cfg["current_index"] = current_idx
+                status_msg = f"Removed {removed}"
+            elif len(servers) <= 1:
+                status_msg = "Cannot remove last server"
+            draw()
+        elif ch == curses.KEY_UP:
+            if servers:
+                selected = max(0, selected - 1)
+                draw()
+        elif ch == curses.KEY_DOWN:
+            if servers:
+                selected = min(len(servers) - 1, selected + 1)
+                draw()
+        elif ch in (10, 13):
+            if servers and selected < len(servers):
+                current_idx = selected
+                cfg["current_index"] = current_idx
+                save_config(cfg)
+                return
+
+
 def main(stdscr, host):
     curses.curs_set(0)
     stdscr.nodelay(False)
@@ -147,7 +346,7 @@ def main(stdscr, host):
     height, width = stdscr.getmaxyx()
 
     header = " LM Studio Model Switcher "
-    help_line = "[/] Search  [s] Sort  [Up/Down] Scroll  [Enter] Load  [u] Unload  [q/Esc] Quit"
+    help_line = "[/] Search  [s] Sort  [o] Servers  [Up/Down] Scroll  [Enter] Load  [u] Unload  [q/Esc] Quit"
 
     models = []
     selected = 0
@@ -158,6 +357,12 @@ def main(stdscr, host):
     status_time = 0
     loaded_instance_ids = set()
     loading = False
+
+    # Load server config
+    cfg = load_config()
+    current_host = get_current_server(cfg)
+    if host == DEFAULT_HOST:
+        host = current_host
 
     def get_filtered_models():
         """Return (filtered_list, count) based on current search query and sort mode."""
@@ -186,7 +391,8 @@ def main(stdscr, host):
 
         # Header
         stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
-        stdscr.addnstr(0, 0, header.center(w), w - 1)
+        server_label = f" Server: {host} "
+        stdscr.addnstr(0, 0, server_label, w - 1)
         stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
 
         # Loaded model status
@@ -384,6 +590,17 @@ def main(stdscr, host):
         elif ch == ord("s"):
             cycle_sort()
             draw()
+        elif ch == ord("o"):
+            server_options_screen(stdscr, cfg)
+            new_host = get_current_server(cfg)
+            if new_host != host:
+                host = new_host
+                status_msg = f"Switched to {host}"
+                status_time = time.time()
+                selected = 0
+                models = []
+                loaded_instance_ids = set()
+                refresh_state()
         elif ch == 10 or ch == 13:
             if models and not loading:
                 target = models[selected]
