@@ -467,17 +467,17 @@ def main(stdscr, host):
                         stdscr.attroff(curses.color_pair(6) | curses.A_BOLD)
 
                     # Overlay capability labels with their own colors
-                    cap_start = len(left_text) + 1
-                    for ci, (cap_label, color_pair) in enumerate(caps):
-                        col = cap_start + ci * (len(cap_label) + 1)
-                        if col < w - 3:
+                    col = len(left_text) + 1
+                    for cap_label, color_pair in caps:
+                        if col < w - 2:
                             stdscr.attron(curses.color_pair(color_pair) | curses.A_BOLD)
                             try:
                                 label_str = f" {cap_label}"
-                                stdscr.addnstr(row, col + 1, label_str[:w-col-2], w - col - 2)
+                                stdscr.addnstr(row, col, label_str, w - col)
                             except curses.error:
                                 pass
                             stdscr.attroff(curses.color_pair(color_pair) | curses.A_BOLD)
+                        col += len(cap_label) + 1
 
 
         # Status message or help line at bottom
