@@ -7,13 +7,12 @@ A terminal UI to browse, load, and unload models from a local LM Studio server.
 Controls:
   Up/Down / k/j   Scroll model list
   Enter           Load the selected model
-  Ctrl+U          Unload the current model
+  u               Unload the current model
   q / Esc         Quit
 """
 
 import argparse
 import curses
-import sys
 import time
 import urllib.request
 import urllib.error
@@ -53,42 +52,37 @@ def api_post(base_url, path, body=None, timeout=30):
 
 
 def fetch_models(base_url):
-    """Return list of model dicts from the server."""
-    data = api_get(base_url, "/v1/models")
-    models = data.get("data", [])
-    return models
-
-
-def fetch_loaded_model(base_url):
-    """Return the currently loaded model info, or None."""
-    try:
-        data = api_get(base_url, "/v1/models/load")
-        return data
-    except ConnectionError:
-        return None
+    """Return (model_list, loaded_model_id) from the v1 API."""
+    data = api_get(base_url, "/api/v1/models")
+    models = data.get("models", [])
+    loaded_id = None
+    for m in models:
+        if m.get("loaded_instances"):
+            loaded_id = m.get("key")
+            break
+    return models, loaded_id
 
 
 def load_model(base_url, model_id):
     """Load a model by ID."""
-    return api_post(base_url, "/v1/models/load", {"model": model_id})
+    return api_post(base_url, "/api/v1/models/load", {"model": model_id})
 
 
-def unload_model(base_url):
-    """Unload the currently loaded model."""
-    return api_post(base_url, "/v1/models/unload")
+def unload_model(base_url, instance_id):
+    """Unload a model by instance ID."""
+    return api_post(base_url, "/api/v1/models/unload", {"instance_id": instance_id})
 
 
 def format_model_name(model):
-    """Extract a readable name from a model dict."""
-    return model.get("id", model.get("object", "unknown"))
+    """Extract a readable name from a model dict (v1 API)."""
+    return model.get("display_name") or model.get("key", "unknown")
 
 
-def format_status(model_info):
+def format_status(loaded_id):
     """Format loaded model status line."""
-    if not model_info:
+    if not loaded_id:
         return "No model loaded"
-    name = model_info.get("model", model_info.get("id", "unknown"))
-    return f"Loaded: {name}"
+    return f"Loaded: {loaded_id}"
 
 
 def main(stdscr, host):
@@ -98,15 +92,14 @@ def main(stdscr, host):
     height, width = stdscr.getmaxyx()
 
     header = " LM Studio Model Switcher "
-    help_line = "[Up/Down] Scroll  [Enter] Load  [Ctrl+U] Unload  [q/Esc] Quit"
+    help_line = "[Up/Down] Scroll  [Enter] Load  [u] Unload  [q/Esc] Quit"
 
     models = []
     selected = 0
     status_msg = ""
     status_time = 0
-    loaded_model = None
+    loaded_model_id = None
     loading = False
-    last_refresh = 0
 
     def draw():
         stdscr.erase()
@@ -118,26 +111,20 @@ def main(stdscr, host):
         stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
 
         # Loaded model status
-        status = format_status(loaded_model)
+        status = format_status(loaded_model_id)
         stdscr.attron(curses.color_pair(2))
         stdscr.addnstr(1, 0, f" {status}", w - 1)
         stdscr.attroff(curses.color_pair(2))
 
         # Loading indicator
+        loading_row = 2
         if loading:
             stdscr.attron(curses.color_pair(3) | curses.A_BOLD)
-            stdscr.addnstr(2, 0, " Loading... please wait. ", w - 1)
+            stdscr.addnstr(loading_row, 0, " Loading... please wait. ", w - 1)
             stdscr.attroff(curses.color_pair(3) | curses.A_BOLD)
 
-        # Temporary status message (fade after 3s)
-        if status_msg and (time.time() - status_time < 3):
-            y = 3 if loading else 2
-            stdscr.attron(curses.color_pair(4))
-            stdscr.addnstr(y, 0, f" {status_msg}", w - 1)
-            stdscr.attroff(curses.color_pair(4))
-
         # Model list
-        list_start = 3 if (loading or status_msg and (time.time() - status_time < 3)) else 2
+        list_start = loading_row + 1
         list_height = h - list_start - 2
 
         if list_height > 0:
@@ -158,32 +145,38 @@ def main(stdscr, host):
                         break
                     row = list_start + i
                     name = format_model_name(models[idx])
+                    is_loaded = models[idx].get("key") == loaded_model_id
                     if idx == selected:
                         stdscr.attron(curses.color_pair(5) | curses.A_BOLD)
                         stdscr.addnstr(row, 1, f"> {name}", w - 3)
                         stdscr.attroff(curses.color_pair(5) | curses.A_BOLD)
+                    elif is_loaded:
+                        stdscr.attron(curses.color_pair(6) | curses.A_BOLD)
+                        stdscr.addnstr(row, 1, f"* {name}", w - 3)
+                        stdscr.attroff(curses.color_pair(6) | curses.A_BOLD)
                     else:
                         stdscr.addnstr(row, 1, f"  {name}", w - 3)
 
-        # Help line
-        stdscr.attron(curses.color_pair(1))
-        stdscr.addnstr(h - 1, 0, help_line.center(w), w - 1)
-        stdscr.attroff(curses.color_pair(1))
+        # Status message or help line at bottom
+        if status_msg and (time.time() - status_time < 3):
+            stdscr.attron(curses.color_pair(4))
+            stdscr.addnstr(h - 1, 0, f" {status_msg}", w - 1)
+            stdscr.attroff(curses.color_pair(4))
+        else:
+            stdscr.attron(curses.color_pair(1))
+            stdscr.addnstr(h - 1, 0, help_line.center(w), w - 1)
+            stdscr.attroff(curses.color_pair(1))
 
         stdscr.refresh()
 
     def refresh_state():
-        nonlocal models, loaded_model
+        nonlocal models, loaded_model_id, status_msg, status_time
         try:
-            models = fetch_models(host)
+            models, loaded_model_id = fetch_models(host)
         except ConnectionError as e:
             status_msg = f"Error: {e}"
             status_time = time.time()
             models = []
-        try:
-            loaded_model = fetch_loaded_model(host)
-        except ConnectionError:
-            loaded_model = None
 
     # Initialize colors
     curses.start_color()
@@ -193,6 +186,7 @@ def main(stdscr, host):
     curses.init_pair(3, curses.COLOR_YELLOW, -1)
     curses.init_pair(4, curses.COLOR_MAGENTA, -1)
     curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_WHITE)
+    curses.init_pair(6, curses.COLOR_GREEN, -1)
 
     refresh_state()
     draw()
@@ -214,29 +208,30 @@ def main(stdscr, host):
         elif ch == 10 or ch == 13:
             if models and not loading:
                 target = models[selected]
-                model_id = format_model_name(target)
+                model_key = target.get("key", target.get("id", "unknown"))
+                model_name = format_model_name(target)
                 loading = True
-                status_msg = f"Loading {model_id}..."
+                status_msg = f"Loading {model_name}..."
                 status_time = time.time()
                 draw()
                 try:
-                    load_model(host, model_id)
-                    loaded_model = {"model": model_id}
-                    status_msg = f"Loaded {model_id}"
+                    load_model(host, model_key)
+                    loaded_model_id = model_key
+                    status_msg = f"Loaded {model_name}"
                 except ConnectionError as e:
                     status_msg = f"Load failed: {e}"
                 finally:
                     loading = False
                     status_time = time.time()
-        elif ch == 21:
-            if not loading:
+        elif ch == ord("u"):
+            if not loading and loaded_model_id:
                 loading = True
                 status_msg = "Unloading model..."
                 status_time = time.time()
                 draw()
                 try:
-                    unload_model(host)
-                    loaded_model = None
+                    unload_model(host, loaded_model_id)
+                    loaded_model_id = None
                     status_msg = "Model unloaded"
                 except ConnectionError as e:
                     status_msg = f"Unload failed: {e}"
@@ -257,5 +252,21 @@ if __name__ == "__main__":
         default=DEFAULT_HOST,
         help=f"LM Studio server URL (default: {DEFAULT_HOST})",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print API responses to stdout before launching TUI",
+    )
     args = parser.parse_args()
+
+    if args.debug:
+        try:
+            models, loaded_id = fetch_models(args.host)
+            print(f"Models API returned {len(models)} models:")
+            for m in models:
+                print(f"  {m}")
+            print(f"Loaded model: {loaded_id!r}")
+        except Exception as e:
+            print(f"Debug error: {e}")
+
     curses.wrapper(main, args.host)
