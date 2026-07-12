@@ -70,15 +70,14 @@ DEFAULT_SORT_INDEX = 0
 
 
 def fetch_models(base_url):
-    """Return (model_list, loaded_model_id) from the v1 API."""
+    """Return (model_list, loaded_instance_ids) from the v1 API."""
     data = api_get(base_url, "/api/v1/models")
     models = data.get("models", [])
-    loaded_id = None
+    loaded_ids = set()
     for m in models:
-        if m.get("loaded_instances"):
-            loaded_id = m.get("key")
-            break
-    return models, loaded_id
+        for inst in m.get("loaded_instances", []):
+            loaded_ids.add(inst.get("id"))
+    return models, loaded_ids
 
 
 def load_model(base_url, model_id):
@@ -96,7 +95,30 @@ def format_model_name(model):
     return model.get("display_name") or model.get("key", "unknown")
 
 
+def is_model_loaded(model, instance_ids):
+    """Check if a model has any loaded instances."""
+    for inst in model.get("loaded_instances", []):
+        if inst.get("id") in instance_ids:
+            return True
+    return False
+
+
+def format_loaded_status(instance_ids, models):
+    """Format loaded model status line showing all loaded instances."""
+    if not instance_ids:
+        return "No model loaded"
+    names = []
+    for inst_id in sorted(instance_ids):
+        for m in models:
+            for inst in m.get("loaded_instances", []):
+                if inst.get("id") == inst_id:
+                    names.append(m.get("display_name") or m.get("key", "unknown"))
+                    break
+    return f"Loaded: {', '.join(names)}"
+
+
 def format_size(model):
+
     """Format model size in GB with one decimal place."""
     size_bytes = model.get("size_bytes")
     if not size_bytes:
@@ -121,7 +143,7 @@ def main(stdscr, host):
     sort_mode_index = DEFAULT_SORT_INDEX
     status_msg = ""
     status_time = 0
-    loaded_model_id = None
+    loaded_instance_ids = set()
     loading = False
 
     def get_filtered_models():
@@ -155,7 +177,7 @@ def main(stdscr, host):
         stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
 
         # Loaded model status
-        status = format_status(loaded_model_id)
+        status = format_loaded_status(loaded_instance_ids, models)
         stdscr.attron(curses.color_pair(2))
         stdscr.addnstr(1, 0, f" {status}", w - 1)
         stdscr.attroff(curses.color_pair(2))
@@ -196,7 +218,7 @@ def main(stdscr, host):
                     row = list_start + i
                     name = format_model_name(filtered[idx])
                     size = format_size(filtered[idx])
-                    is_loaded = filtered[idx].get("key") == loaded_model_id
+                    is_loaded = is_model_loaded(filtered[idx], loaded_instance_ids)
                     line = f"> {name}  {size}" if idx == selected else (f"* {name}  {size}" if is_loaded else f"  {name}  {size}")
                     if idx == selected:
                         stdscr.attron(curses.color_pair(5) | curses.A_BOLD)
@@ -229,9 +251,9 @@ def main(stdscr, host):
         stdscr.refresh()
 
     def refresh_state():
-        nonlocal models, loaded_model_id, status_msg, status_time
+        nonlocal models, loaded_instance_ids, status_msg, status_time
         try:
-            models, loaded_model_id = fetch_models(host)
+            models, loaded_instance_ids = fetch_models(host)
         except ConnectionError as e:
             status_msg = f"Error: {e}"
             status_time = time.time()
@@ -271,7 +293,7 @@ def main(stdscr, host):
                         draw()
                         try:
                             load_model(host, model_key)
-                            loaded_model_id = model_key
+                            loaded_instance_ids.add(model_key)
                             status_msg = f"Loaded {model_name}"
                         except ConnectionError as e:
                             status_msg = f"Load failed: {e}"
@@ -329,7 +351,7 @@ def main(stdscr, host):
                 draw()
                 try:
                     load_model(host, model_key)
-                    loaded_model_id = model_key
+                    loaded_instance_ids.add(model_key)
                     status_msg = f"Loaded {model_name}"
                 except ConnectionError as e:
                     status_msg = f"Load failed: {e}"
@@ -337,14 +359,15 @@ def main(stdscr, host):
                     loading = False
                     status_time = time.time()
         elif ch == ord("u"):
-            if not loading and loaded_model_id:
+            if not loading and loaded_instance_ids:
                 loading = True
                 status_msg = "Unloading model..."
                 status_time = time.time()
                 draw()
                 try:
-                    unload_model(host, loaded_model_id)
-                    loaded_model_id = None
+                    instance_id = next(iter(loaded_instance_ids))
+                    unload_model(host, instance_id)
+                    loaded_instance_ids.discard(instance_id)
                     status_msg = "Model unloaded"
                 except ConnectionError as e:
                     status_msg = f"Unload failed: {e}"
