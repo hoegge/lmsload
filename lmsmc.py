@@ -8,6 +8,7 @@ Controls:
   Up/Down / k/j   Scroll model list
   Enter           Load the selected model
   /               Live search models
+  s               Toggle sort (name/size)
   u               Unload the current model
   q / Esc         Quit
 """
@@ -52,6 +53,22 @@ def api_post(base_url, path, body=None, timeout=30):
         raise ConnectionError(f"Cannot reach {url}: {e.reason}")
 
 
+def format_status(loaded_id):
+    """Format loaded model status line."""
+    if not loaded_id:
+        return "No model loaded"
+    return f"Loaded: {loaded_id}"
+
+
+SORT_MODES = [
+    ("unsorted", None),
+    ("name", lambda m: format_model_name(m).casefold()),
+    ("size", lambda m: m.get("size_bytes") or 0),
+]
+
+DEFAULT_SORT_INDEX = 0
+
+
 def fetch_models(base_url):
     """Return (model_list, loaded_model_id) from the v1 API."""
     data = api_get(base_url, "/api/v1/models")
@@ -79,11 +96,13 @@ def format_model_name(model):
     return model.get("display_name") or model.get("key", "unknown")
 
 
-def format_status(loaded_id):
-    """Format loaded model status line."""
-    if not loaded_id:
-        return "No model loaded"
-    return f"Loaded: {loaded_id}"
+def format_size(model):
+    """Format model size in GB with one decimal place."""
+    size_bytes = model.get("size_bytes")
+    if not size_bytes:
+        return ""
+    gb = size_bytes / (1024 ** 3)
+    return f"[{gb:.1f}GB]"
 
 
 def main(stdscr, host):
@@ -93,29 +112,38 @@ def main(stdscr, host):
     height, width = stdscr.getmaxyx()
 
     header = " LM Studio Model Switcher "
-    help_line = "[/] Search  [Up/Down] Scroll  [Enter] Load  [u] Unload  [q/Esc] Quit"
+    help_line = "[/] Search  [s] Sort  [Up/Down] Scroll  [Enter] Load  [u] Unload  [q/Esc] Quit"
 
     models = []
     selected = 0
     search_mode = False
     search_query = ""
+    sort_mode_index = DEFAULT_SORT_INDEX
     status_msg = ""
     status_time = 0
     loaded_model_id = None
     loading = False
 
     def get_filtered_models():
-        """Return (filtered_list, count) based on current search query."""
-        if not search_query:
-            return models, len(models)
-        q = search_query.casefold()
-        filtered = []
-        for m in models:
-            name_lower = format_model_name(m).casefold()
-            key_lower = m.get("key", "").casefold()
-            if q in name_lower or q in key_lower:
-                filtered.append(m)
+        """Return (filtered_list, count) based on current search query and sort mode."""
+        filtered = list(models)
+        if search_query:
+            q = search_query.casefold()
+            filtered = [m for m in filtered if q in format_model_name(m).casefold() or q in m.get("key", "").casefold()]
+        key_fn, sort_key = SORT_MODES[sort_mode_index]
+        if len(filtered) > 1 and sort_key is not None:
+            reverse = sort_mode_index == 2  # size index is 2: descending (largest first)
+            filtered.sort(key=sort_key, reverse=reverse)
         return filtered, len(filtered)
+
+    def cycle_sort():
+        """Cycle to next sort mode and show status."""
+        nonlocal sort_mode_index, status_msg, status_time
+        sort_mode_index = (sort_mode_index + 1) % len(SORT_MODES)
+        name_fn, _ = SORT_MODES[sort_mode_index]
+        direction = "largest first" if name_fn == "size" else ""
+        status_msg = f"Sort: {name_fn} ({direction})" if direction else f"Sort: {name_fn}"
+        status_time = time.time()
 
     def draw():
         stdscr.erase()
@@ -147,7 +175,9 @@ def main(stdscr, host):
             filtered, count = get_filtered_models()
             label = f" Models ({count}): "
             if search_mode:
-                label += f"[{search_query}]"
+                label += f"[{search_query}] "
+            sort_name_fn, _ = SORT_MODES[sort_mode_index]
+            label += f"[{sort_name_fn}]"
             stdscr.addnstr(list_start - 1, 0, label, w - 1)
 
             # Calculate visible window
@@ -165,17 +195,19 @@ def main(stdscr, host):
                         break
                     row = list_start + i
                     name = format_model_name(filtered[idx])
+                    size = format_size(filtered[idx])
                     is_loaded = filtered[idx].get("key") == loaded_model_id
+                    line = f"> {name}  {size}" if idx == selected else (f"* {name}  {size}" if is_loaded else f"  {name}  {size}")
                     if idx == selected:
                         stdscr.attron(curses.color_pair(5) | curses.A_BOLD)
-                        stdscr.addnstr(row, 1, f"> {name}", w - 3)
+                        stdscr.addnstr(row, 1, line.strip(), w - 3)
                         stdscr.attroff(curses.color_pair(5) | curses.A_BOLD)
                     elif is_loaded:
                         stdscr.attron(curses.color_pair(6) | curses.A_BOLD)
-                        stdscr.addnstr(row, 1, f"* {name}", w - 3)
+                        stdscr.addnstr(row, 1, line.strip(), w - 3)
                         stdscr.attroff(curses.color_pair(6) | curses.A_BOLD)
                     else:
-                        stdscr.addnstr(row, 1, f"  {name}", w - 3)
+                        stdscr.addnstr(row, 1, line.strip(), w - 3)
 
         # Status message or help line at bottom
         if status_msg and (time.time() - status_time < 3):
@@ -283,6 +315,9 @@ def main(stdscr, host):
         elif ch == ord("/"):
             search_mode = True
             search_query = ""
+        elif ch == ord("s"):
+            cycle_sort()
+            draw()
         elif ch == 10 or ch == 13:
             if models and not loading:
                 target = models[selected]
