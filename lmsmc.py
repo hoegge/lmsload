@@ -7,6 +7,7 @@ A terminal UI to browse, load, and unload models from a local LM Studio server.
 Controls:
   Up/Down / k/j   Scroll model list
   Enter           Load the selected model
+  /               Live search models
   u               Unload the current model
   q / Esc         Quit
 """
@@ -92,14 +93,29 @@ def main(stdscr, host):
     height, width = stdscr.getmaxyx()
 
     header = " LM Studio Model Switcher "
-    help_line = "[Up/Down] Scroll  [Enter] Load  [u] Unload  [q/Esc] Quit"
+    help_line = "[/] Search  [Up/Down] Scroll  [Enter] Load  [u] Unload  [q/Esc] Quit"
 
     models = []
     selected = 0
+    search_mode = False
+    search_query = ""
     status_msg = ""
     status_time = 0
     loaded_model_id = None
     loading = False
+
+    def get_filtered_models():
+        """Return (filtered_list, count) based on current search query."""
+        if not search_query:
+            return models, len(models)
+        q = search_query.casefold()
+        filtered = []
+        for m in models:
+            name_lower = format_model_name(m).casefold()
+            key_lower = m.get("key", "").casefold()
+            if q in name_lower or q in key_lower:
+                filtered.append(m)
+        return filtered, len(filtered)
 
     def draw():
         stdscr.erase()
@@ -127,11 +143,15 @@ def main(stdscr, host):
         list_start = loading_row + 1
         list_height = h - list_start - 2
 
-        if list_height > 0:
-            stdscr.addnstr(list_start - 1, 0, f" Models ({len(models)}): ", w - 1)
+        if list_height > 0 and not loading:
+            filtered, count = get_filtered_models()
+            label = f" Models ({count}): "
+            if search_mode:
+                label += f"[{search_query}]"
+            stdscr.addnstr(list_start - 1, 0, label, w - 1)
 
             # Calculate visible window
-            if models:
+            if filtered:
                 if selected < list_start:
                     offset = 0
                 elif selected >= list_start + list_height:
@@ -141,11 +161,11 @@ def main(stdscr, host):
 
                 for i in range(list_height):
                     idx = offset + i
-                    if idx >= len(models):
+                    if idx >= len(filtered):
                         break
                     row = list_start + i
-                    name = format_model_name(models[idx])
-                    is_loaded = models[idx].get("key") == loaded_model_id
+                    name = format_model_name(filtered[idx])
+                    is_loaded = filtered[idx].get("key") == loaded_model_id
                     if idx == selected:
                         stdscr.attron(curses.color_pair(5) | curses.A_BOLD)
                         stdscr.addnstr(row, 1, f"> {name}", w - 3)
@@ -162,6 +182,13 @@ def main(stdscr, host):
             stdscr.attron(curses.color_pair(4))
             stdscr.addnstr(h - 1, 0, f" {status_msg}", w - 1)
             stdscr.attroff(curses.color_pair(4))
+        elif search_mode:
+            prompt = f" /{search_query} "
+            if len(prompt) > w - 2:
+                prompt = "/" + search_query[-(w-4):]
+            stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
+            stdscr.addnstr(h - 1, 0, prompt.center(w), w - 1)
+            stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
         else:
             stdscr.attron(curses.color_pair(1))
             stdscr.addnstr(h - 1, 0, help_line.center(w), w - 1)
@@ -195,16 +222,67 @@ def main(stdscr, host):
         stdscr.timeout(500)
         ch = stdscr.getch()
 
-        if ch in (ord("q"), 27):
+        if search_mode:
+            if ch in (10, 13):
+                if models and not loading:
+                    filtered, _ = get_filtered_models()
+                    if filtered:
+                        selected = max(0, min(selected, len(filtered) - 1))
+                        target = filtered[selected]
+                        model_key = target.get("key", target.get("id", "unknown"))
+                        model_name = format_model_name(target)
+                        search_mode = False
+                        search_query = ""
+                        loading = True
+                        status_msg = f"Loading {model_name}..."
+                        status_time = time.time()
+                        draw()
+                        try:
+                            load_model(host, model_key)
+                            loaded_model_id = model_key
+                            status_msg = f"Loaded {model_name}"
+                        except ConnectionError as e:
+                            status_msg = f"Load failed: {e}"
+                        finally:
+                            loading = False
+                            status_time = time.time()
+            elif ch == 27:
+                search_mode = False
+                search_query = ""
+                selected = 0
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                if search_query:
+                    search_query = search_query[:-1]
+                    selected = 0
+            elif ch == curses.KEY_UP or ch == ord("k"):
+                filtered, _ = get_filtered_models()
+                if filtered and len(filtered) > 1:
+                    selected = max(0, selected - 1)
+            elif ch == curses.KEY_DOWN or ch == ord("j"):
+                filtered, _ = get_filtered_models()
+                if filtered and len(filtered) > 1:
+                    selected = min(len(filtered) - 1, selected + 1)
+            elif 32 <= ch < 127:
+                search_query += chr(ch)
+                selected = 0
+
+        elif ch == ord("q"):
             break
         elif ch in (curses.KEY_UP, ord("k")):
             if models:
-                selected = max(0, selected - 1)
+                filtered, _ = get_filtered_models()
+                if filtered:
+                    selected = max(0, selected - 1)
         elif ch in (curses.KEY_DOWN, ord("j")):
             if models:
-                selected = min(len(models) - 1, selected + 1)
+                filtered, _ = get_filtered_models()
+                if filtered:
+                    selected = min(len(filtered) - 1, selected + 1)
         elif ch == curses.KEY_RESIZE:
             pass
+        elif ch == ord("/"):
+            search_mode = True
+            search_query = ""
         elif ch == 10 or ch == 13:
             if models and not loading:
                 target = models[selected]
