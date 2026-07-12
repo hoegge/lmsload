@@ -103,6 +103,19 @@ def is_model_loaded(model, instance_ids):
     return False
 
 
+def format_capabilities(model):
+    """Extract and format capability labels (vision, tool_use)."""
+    caps = model.get("capabilities", {}) or {}
+    vision = caps.get("vision", False)
+    tools = caps.get("trained_for_tool_use", False)
+    parts = []
+    if vision:
+        parts.append(("Vision", 7))   # pair 7 = yellow for vision
+    if tools:
+        parts.append(("Tools", 8))    # pair 8 = magenta for tools
+    return parts
+
+
 def format_loaded_status(instance_ids, models):
     """Format loaded model status line showing all loaded instances."""
     if not instance_ids:
@@ -219,17 +232,47 @@ def main(stdscr, host):
                     name = format_model_name(filtered[idx])
                     size = format_size(filtered[idx])
                     is_loaded = is_model_loaded(filtered[idx], loaded_instance_ids)
-                    line = f"> {name}  {size}" if idx == selected else (f"* {name}  {size}" if is_loaded else f"  {name}  {size}")
+
+                    # Build full line: prefix, name, size, capabilities
+                    prefix = ">" if idx == selected else ("*" if is_loaded else "  ")
+                    left_text = f"{prefix} {name}  {size}"
+
+                    caps = format_capabilities(filtered[idx])
+                    cap_strs = [f" {cap[0]}" for cap in caps]
+                    full_line = left_text + "".join(cap_strs)
+
+                    # Draw the whole line normally first
+                    stdscr.addnstr(row, 1, full_line.strip()[:w-3], w - 3)
+
+                    # Overlay highlight on name/size portion for selected/loading
                     if idx == selected:
                         stdscr.attron(curses.color_pair(5) | curses.A_BOLD)
-                        stdscr.addnstr(row, 1, line.strip(), w - 3)
+                        try:
+                            stdscr.addnstr(row, 1, left_text.strip()[:w-3], w - 3)
+                        except curses.error:
+                            pass
                         stdscr.attroff(curses.color_pair(5) | curses.A_BOLD)
                     elif is_loaded:
                         stdscr.attron(curses.color_pair(6) | curses.A_BOLD)
-                        stdscr.addnstr(row, 1, line.strip(), w - 3)
+                        try:
+                            stdscr.addnstr(row, 1, left_text.strip()[:w-3], w - 3)
+                        except curses.error:
+                            pass
                         stdscr.attroff(curses.color_pair(6) | curses.A_BOLD)
-                    else:
-                        stdscr.addnstr(row, 1, line.strip(), w - 3)
+
+                    # Overlay capability labels with their own colors
+                    cap_start = len(left_text) + 1
+                    for ci, (cap_label, color_pair) in enumerate(caps):
+                        col = cap_start + ci * (len(cap_label) + 1)
+                        if col < w - 3:
+                            stdscr.attron(curses.color_pair(color_pair) | curses.A_BOLD)
+                            try:
+                                label_str = f" {cap_label}"
+                                stdscr.addnstr(row, col + 1, label_str[:w-col-2], w - col - 2)
+                            except curses.error:
+                                pass
+                            stdscr.attroff(curses.color_pair(color_pair) | curses.A_BOLD)
+
 
         # Status message or help line at bottom
         if status_msg and (time.time() - status_time < 3):
@@ -268,7 +311,8 @@ def main(stdscr, host):
     curses.init_pair(4, curses.COLOR_MAGENTA, -1)
     curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_WHITE)
     curses.init_pair(6, curses.COLOR_GREEN, -1)
-
+    curses.init_pair(7, curses.COLOR_YELLOW, -1)
+    curses.init_pair(8, curses.COLOR_MAGENTA, -1)
     refresh_state()
     draw()
 
