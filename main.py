@@ -1,5 +1,5 @@
 def main():
-    print("Hello from lmsmc!")
+    print("Hello from lmsload!")
 
 
 if __name__ == "__main__":

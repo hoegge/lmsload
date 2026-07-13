@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LM Studio Model Switcher Console (lmsmc)
+LM Studio Model Loader (lmsload)
 
 A terminal UI to browse, load, and unload models from a local LM Studio server.
 
@@ -14,7 +14,7 @@ Controls:
   u               Unload the selected model
   q / Esc         Quit
 
-Server settings stored in ~/.config/lmsmc/config.yaml
+Server settings stored in ~/.config/lmsload/config.yaml
 """
 
 import argparse
@@ -31,8 +31,9 @@ from pathlib import Path
 
 DEFAULT_HOST = "http://localhost:1234"
 LIST_TOP = 3  # first model row: below header, loaded-status, and list-label rows
-CONFIG_DIR = Path.home() / ".config" / "lmsmc"
+CONFIG_DIR = Path.home() / ".config" / "lmsload"
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
+LEGACY_CONFIG_FILE = Path.home() / ".config" / "lmsmc" / "config.yaml"  # pre-rename location
 
 
 def api_get(base_url, path, timeout=5):
@@ -149,10 +150,11 @@ def format_size(model):
 
 
 def load_config():
-    """Load server list from config file."""
-    if CONFIG_FILE.exists():
-        with open(CONFIG_FILE) as f:
-            return yaml.safe_load(f) or {}
+    """Load server list from config file, falling back to the old lmsmc location."""
+    for path in (CONFIG_FILE, LEGACY_CONFIG_FILE):
+        if path.exists():
+            with open(path) as f:
+                return yaml.safe_load(f) or {}
     return {"servers": [DEFAULT_HOST], "current_index": 0}
 
 
@@ -624,7 +626,7 @@ def main(stdscr, host):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="LM Studio Model Switcher Console")
+    parser = argparse.ArgumentParser(description="lmsload - LM Studio Model Loader")
     parser.add_argument(
         "--host",
         default=DEFAULT_HOST,
