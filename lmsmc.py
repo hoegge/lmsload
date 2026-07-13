@@ -10,7 +10,7 @@ Controls:
   /               Live search models
   s               Toggle sort (name/size)
   o               Server options (switch/add/delete servers)
-  u               Unload the current model
+  u               Unload the selected model
   q / Esc         Quit
 
 Server settings stored in ~/.config/lmsmc/config.yaml
@@ -571,22 +571,29 @@ def main(stdscr, host):
             if filtered and not loading:
                 do_load(filtered[selected])
         elif ch == ord("u"):
-            if not loading and loaded_instance_ids:
-                loading = True
-                status_msg = "Unloading model..."
-                status_time = time.time()
-                draw(filtered)
-                try:
-                    instance_id = next(iter(loaded_instance_ids))
-                    unload_model(host, instance_id)
-                    loaded_instance_ids.discard(instance_id)
-                    status_msg = "Model unloaded"
-                except ConnectionError as e:
-                    status_msg = f"Unload failed: {e}"
-                finally:
-                    loading = False
+            if not loading and filtered:
+                target = filtered[selected]
+                instances = target.get("loaded_instances", [])
+                if not instances:
+                    status_msg = "Selected model is not loaded"
                     status_time = time.time()
-                refresh_state()
+                else:
+                    model_name = format_model_name(target)
+                    loading = True
+                    status_msg = f"Unloading {model_name}..."
+                    status_time = time.time()
+                    draw(filtered)
+                    try:
+                        instance_id = instances[0].get("id")
+                        unload_model(host, instance_id)
+                        loaded_instance_ids.discard(instance_id)
+                        status_msg = f"Unloaded {model_name}"
+                    except ConnectionError as e:
+                        status_msg = f"Unload failed: {e}"
+                    finally:
+                        loading = False
+                        status_time = time.time()
+                    refresh_state()
 
 
 if __name__ == "__main__":
