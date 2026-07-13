@@ -7,6 +7,7 @@ A terminal UI to browse, load, and unload models from a local LM Studio server.
 Controls:
   Up/Down / k/j   Scroll model list
   Enter           Load the selected model
+  Double-click    Load / unload the clicked model (single click selects)
   /               Live search models
   s               Toggle sort (name/size)
   o               Server options (switch/add/delete servers)
@@ -29,6 +30,7 @@ from pathlib import Path
 
 
 DEFAULT_HOST = "http://localhost:1234"
+LIST_TOP = 3  # first model row: below header, loaded-status, and list-label rows
 CONFIG_DIR = Path.home() / ".config" / "lmsmc"
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
 
@@ -399,14 +401,13 @@ def main(stdscr, host):
         stdscr.attroff(curses.color_pair(2))
 
         # Loading indicator
-        loading_row = 2
         if loading:
             stdscr.attron(curses.color_pair(3) | curses.A_BOLD)
-            stdscr.addnstr(loading_row, 0, " Loading... please wait. ", w - 1)
+            stdscr.addnstr(LIST_TOP - 1, 0, " Loading... please wait. ", w - 1)
             stdscr.attroff(curses.color_pair(3) | curses.A_BOLD)
 
         # Model list
-        list_start = loading_row + 1
+        list_start = LIST_TOP
         list_height = h - list_start - 2
 
         if list_height > 0 and not loading:
@@ -490,6 +491,31 @@ def main(stdscr, host):
             status_time = time.time()
         refresh_state()
 
+    def do_unload(target):
+        """Unload the first loaded instance of a model, then refresh state."""
+        nonlocal loading, status_msg, status_time
+        instances = target.get("loaded_instances", [])
+        if not instances:
+            status_msg = "Selected model is not loaded"
+            status_time = time.time()
+            return
+        model_name = format_model_name(target)
+        loading = True
+        status_msg = f"Unloading {model_name}..."
+        status_time = time.time()
+        draw(get_filtered())
+        try:
+            instance_id = instances[0].get("id")
+            unload_model(host, instance_id)
+            loaded_instance_ids.discard(instance_id)
+            status_msg = f"Unloaded {model_name}"
+        except ConnectionError as e:
+            status_msg = f"Unload failed: {e}"
+        finally:
+            loading = False
+            status_time = time.time()
+        refresh_state()
+
     # Initialize colors
     curses.start_color()
     curses.use_default_colors()
@@ -501,6 +527,9 @@ def main(stdscr, host):
     curses.init_pair(6, curses.COLOR_GREEN, -1)
     curses.init_pair(7, curses.COLOR_YELLOW, -1)
     curses.init_pair(8, curses.COLOR_MAGENTA, -1)
+
+    curses.mousemask(curses.BUTTON1_CLICKED | curses.BUTTON1_DOUBLE_CLICKED)
+    curses.mouseinterval(400)  # max ms between clicks of a double-click
 
     refresh_state()
     last_refresh = time.time()
@@ -520,6 +549,25 @@ def main(stdscr, host):
             if time.time() - last_refresh > 5:
                 refresh_state()
                 last_refresh = time.time()
+            continue
+
+        if ch == curses.KEY_MOUSE:
+            try:
+                _, mx, my, _, bstate = curses.getmouse()
+            except curses.error:
+                continue
+            h, _ = stdscr.getmaxyx()
+            i = my - LIST_TOP
+            if 0 <= i < h - LIST_TOP - 2:
+                idx = scroll_offset + i
+                if idx < len(filtered):
+                    selected = idx
+                    if bstate & curses.BUTTON1_DOUBLE_CLICKED and not loading:
+                        target = filtered[idx]
+                        if target.get("loaded_instances"):
+                            do_unload(target)
+                        else:
+                            do_load(target)
             continue
 
         if search_mode:
@@ -572,28 +620,7 @@ def main(stdscr, host):
                 do_load(filtered[selected])
         elif ch == ord("u"):
             if not loading and filtered:
-                target = filtered[selected]
-                instances = target.get("loaded_instances", [])
-                if not instances:
-                    status_msg = "Selected model is not loaded"
-                    status_time = time.time()
-                else:
-                    model_name = format_model_name(target)
-                    loading = True
-                    status_msg = f"Unloading {model_name}..."
-                    status_time = time.time()
-                    draw(filtered)
-                    try:
-                        instance_id = instances[0].get("id")
-                        unload_model(host, instance_id)
-                        loaded_instance_ids.discard(instance_id)
-                        status_msg = f"Unloaded {model_name}"
-                    except ConnectionError as e:
-                        status_msg = f"Unload failed: {e}"
-                    finally:
-                        loading = False
-                        status_time = time.time()
-                    refresh_state()
+                do_unload(filtered[selected])
 
 
 if __name__ == "__main__":
