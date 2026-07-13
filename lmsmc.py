@@ -62,13 +62,6 @@ def api_post(base_url, path, body=None, timeout=30):
         raise ConnectionError(f"Cannot reach {url}: {e.reason}")
 
 
-def format_status(loaded_id):
-    """Format loaded model status line."""
-    if not loaded_id:
-        return "No model loaded"
-    return f"Loaded: {loaded_id}"
-
-
 SORT_MODES = [
     ("unsorted", None),
     ("name", lambda m: format_model_name(m).casefold()),
@@ -101,7 +94,11 @@ def unload_model(base_url, instance_id):
 
 def format_model_name(model):
     """Extract a readable name from a model dict (v1 API)."""
-    return model.get("display_name") or model.get("key", "unknown")
+    display = model.get("display_name") or model.get("key", "unknown")
+    key = model.get("key")
+    if key and key != display:
+        return f"{display} ({key})"
+    return display
 
 
 def is_model_loaded(model, instance_ids):
@@ -343,13 +340,11 @@ def main(stdscr, host):
     curses.curs_set(0)
     stdscr.nodelay(False)
 
-    height, width = stdscr.getmaxyx()
-
-    header = " LM Studio Model Switcher "
     help_line = "[/] Search  [s] Sort  [o] Servers  [Up/Down] Scroll  [Enter] Load  [u] Unload  [q/Esc] Quit"
 
     models = []
     selected = 0
+    scroll_offset = 0
     search_mode = False
     search_query = ""
     sort_mode_index = DEFAULT_SORT_INDEX
@@ -364,41 +359,39 @@ def main(stdscr, host):
     if host == DEFAULT_HOST:
         host = current_host
 
-    def get_filtered_models():
-        """Return (filtered_list, count) based on current search query and sort mode."""
+    def get_filtered():
+        """Return filtered/sorted model list."""
         filtered = list(models)
         if search_query:
             q = search_query.casefold()
             filtered = [m for m in filtered if q in format_model_name(m).casefold() or q in m.get("key", "").casefold()]
-        key_fn, sort_key = SORT_MODES[sort_mode_index]
+        _, sort_key = SORT_MODES[sort_mode_index]
         if len(filtered) > 1 and sort_key is not None:
-            reverse = sort_mode_index == 2  # size index is 2: descending (largest first)
-            filtered.sort(key=sort_key, reverse=reverse)
-        return filtered, len(filtered)
+            filtered.sort(key=sort_key, reverse=sort_mode_index == 2)
+        return filtered
 
-    def cycle_sort():
-        """Cycle to next sort mode and show status."""
-        nonlocal sort_mode_index, status_msg, status_time
-        sort_mode_index = (sort_mode_index + 1) % len(SORT_MODES)
-        name_fn, _ = SORT_MODES[sort_mode_index]
-        direction = "largest first" if name_fn == "size" else ""
-        status_msg = f"Sort: {name_fn} ({direction})" if direction else f"Sort: {name_fn}"
-        status_time = time.time()
+    def refresh_state():
+        nonlocal models, loaded_instance_ids, status_msg, status_time
+        try:
+            models, loaded_instance_ids = fetch_models(host)
+        except ConnectionError as e:
+            status_msg = f"Error: {e}"
+            status_time = time.time()
+            models = []
 
-    def draw():
+    def draw(filtered):
+        nonlocal scroll_offset
         stdscr.erase()
         h, w = stdscr.getmaxyx()
 
         # Header
         stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
-        server_label = f" Server: {host} "
-        stdscr.addnstr(0, 0, server_label, w - 1)
+        stdscr.addnstr(0, 0, f" Server: {host} ", w - 1)
         stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
 
         # Loaded model status
-        status = format_loaded_status(loaded_instance_ids, models)
         stdscr.attron(curses.color_pair(2))
-        stdscr.addnstr(1, 0, f" {status}", w - 1)
+        stdscr.addnstr(1, 0, f" {format_loaded_status(loaded_instance_ids, models)}", w - 1)
         stdscr.attroff(curses.color_pair(2))
 
         # Loading indicator
@@ -413,82 +406,57 @@ def main(stdscr, host):
         list_height = h - list_start - 2
 
         if list_height > 0 and not loading:
-            filtered, count = get_filtered_models()
-            label = f" Models ({count}): "
-            if search_mode:
-                label += f"[{search_query}] "
             sort_name_fn, _ = SORT_MODES[sort_mode_index]
-            label += f"[{sort_name_fn}]"
+            label = f" Models ({len(filtered)}): [{sort_name_fn}]"
+            if search_mode:
+                label += f" [/{search_query}]"
             stdscr.addnstr(list_start - 1, 0, label, w - 1)
 
-            # Calculate visible window
             if filtered:
-                if selected < list_start:
-                    offset = 0
-                elif selected >= list_start + list_height:
-                    offset = selected - list_height + 1
-                else:
-                    offset = selected - list_start
+                # Keep the selected row inside the visible window
+                if selected < scroll_offset:
+                    scroll_offset = selected
+                elif selected >= scroll_offset + list_height:
+                    scroll_offset = selected - list_height + 1
+                scroll_offset = max(0, min(scroll_offset, len(filtered) - 1))
 
                 for i in range(list_height):
-                    idx = offset + i
-                    if idx >= len(filtered):
-                        break
                     row = list_start + i
-                    name = format_model_name(filtered[idx])
-                    size = format_size(filtered[idx])
-                    is_loaded = is_model_loaded(filtered[idx], loaded_instance_ids)
+                    idx = scroll_offset + i
+                    if row >= h - 1 or idx >= len(filtered):
+                        break
+                    m = filtered[idx]
+                    name = format_model_name(m)
+                    size = format_size(m)
+                    is_loaded = is_model_loaded(m, loaded_instance_ids)
+                    prefix = ">" if idx == selected else ("*" if is_loaded else " ")
+                    line = f"{prefix} {name}  {size}"
 
-                    # Build full line: prefix, name, size, capabilities
-                    prefix = ">" if idx == selected else ("*" if is_loaded else "  ")
-                    left_text = f"{prefix} {name}  {size}"
-
-                    caps = format_capabilities(filtered[idx])
-                    cap_strs = [f" {cap[0]}" for cap in caps]
-                    full_line = left_text + "".join(cap_strs)
-
-                    # Draw the whole line normally first
-                    stdscr.addnstr(row, 1, full_line.strip()[:w-3], w - 3)
-
-                    # Overlay highlight on name/size portion for selected/loading
                     if idx == selected:
                         stdscr.attron(curses.color_pair(5) | curses.A_BOLD)
-                        try:
-                            stdscr.addnstr(row, 1, left_text.strip()[:w-3], w - 3)
-                        except curses.error:
-                            pass
-                        stdscr.attroff(curses.color_pair(5) | curses.A_BOLD)
                     elif is_loaded:
                         stdscr.attron(curses.color_pair(6) | curses.A_BOLD)
-                        try:
-                            stdscr.addnstr(row, 1, left_text.strip()[:w-3], w - 3)
-                        except curses.error:
-                            pass
-                        stdscr.attroff(curses.color_pair(6) | curses.A_BOLD)
+                    stdscr.addnstr(row, 1, line, w - 3)
+                    if idx == selected or is_loaded:
+                        stdscr.attroff(curses.color_pair(5 if idx == selected else 6) | curses.A_BOLD)
 
-                    # Overlay capability labels with their own colors
-                    col = len(left_text) + 1
-                    for cap_label, color_pair in caps:
+                    # Capability badges
+                    caps = format_capabilities(m)
+                    col = len(line) + 1
+                    for cap_label, cp in caps:
                         if col < w - 2:
-                            stdscr.attron(curses.color_pair(color_pair) | curses.A_BOLD)
-                            try:
-                                label_str = f" {cap_label}"
-                                stdscr.addnstr(row, col, label_str, w - col)
-                            except curses.error:
-                                pass
-                            stdscr.attroff(curses.color_pair(color_pair) | curses.A_BOLD)
-                        col += len(cap_label) + 1
+                            stdscr.attron(curses.color_pair(cp) | curses.A_BOLD)
+                            stdscr.addnstr(row, col, f" {cap_label}", w - col)
+                            stdscr.attroff(curses.color_pair(cp) | curses.A_BOLD)
+                        col += len(cap_label) + 2
 
-
-        # Status message or help line at bottom
+        # Status / help line
         if status_msg and (time.time() - status_time < 3):
             stdscr.attron(curses.color_pair(4))
             stdscr.addnstr(h - 1, 0, f" {status_msg}", w - 1)
             stdscr.attroff(curses.color_pair(4))
         elif search_mode:
             prompt = f" /{search_query} "
-            if len(prompt) > w - 2:
-                prompt = "/" + search_query[-(w-4):]
             stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
             stdscr.addnstr(h - 1, 0, prompt.center(w), w - 1)
             stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
@@ -499,14 +467,24 @@ def main(stdscr, host):
 
         stdscr.refresh()
 
-    def refresh_state():
-        nonlocal models, loaded_instance_ids, status_msg, status_time
+    def do_load(target):
+        """Load a model, showing progress, then refresh state from the server."""
+        nonlocal loading, status_msg, status_time
+        model_key = target.get("key", target.get("id", "unknown"))
+        model_name = format_model_name(target)
+        loading = True
+        status_msg = f"Loading {model_name}..."
+        status_time = time.time()
+        draw(get_filtered())
         try:
-            models, loaded_instance_ids = fetch_models(host)
+            load_model(host, model_key)
+            status_msg = f"Loaded {model_name}"
         except ConnectionError as e:
-            status_msg = f"Error: {e}"
+            status_msg = f"Load failed: {e}"
+        finally:
+            loading = False
             status_time = time.time()
-            models = []
+        refresh_state()
 
     # Initialize colors
     curses.start_color()
@@ -519,112 +497,81 @@ def main(stdscr, host):
     curses.init_pair(6, curses.COLOR_GREEN, -1)
     curses.init_pair(7, curses.COLOR_YELLOW, -1)
     curses.init_pair(8, curses.COLOR_MAGENTA, -1)
+
     refresh_state()
-    draw()
+    last_refresh = time.time()
 
     while True:
+        filtered = get_filtered()
+        if filtered:
+            selected = max(0, min(selected, len(filtered) - 1))
+
+        draw(filtered)
+
         stdscr.timeout(500)
         ch = stdscr.getch()
 
+        if ch == -1:
+            # Idle tick: periodically pick up load/unload changes from the server
+            if time.time() - last_refresh > 5:
+                refresh_state()
+                last_refresh = time.time()
+            continue
+
         if search_mode:
             if ch in (10, 13):
-                if models and not loading:
-                    filtered, _ = get_filtered_models()
-                    if filtered:
-                        selected = max(0, min(selected, len(filtered) - 1))
-                        target = filtered[selected]
-                        model_key = target.get("key", target.get("id", "unknown"))
-                        model_name = format_model_name(target)
-                        search_mode = False
-                        search_query = ""
-                        loading = True
-                        status_msg = f"Loading {model_name}..."
-                        status_time = time.time()
-                        draw()
-                        try:
-                            load_model(host, model_key)
-                            loaded_instance_ids.add(model_key)
-                            status_msg = f"Loaded {model_name}"
-                        except ConnectionError as e:
-                            status_msg = f"Load failed: {e}"
-                        finally:
-                            loading = False
-                            status_time = time.time()
+                if filtered and not loading:
+                    target = filtered[selected]
+                    search_mode = False
+                    search_query = ""
+                    selected = 0
+                    do_load(target)
             elif ch == 27:
                 search_mode = False
                 search_query = ""
                 selected = 0
             elif ch in (curses.KEY_BACKSPACE, 127, 8):
-                if search_query:
-                    search_query = search_query[:-1]
-                    selected = 0
+                search_query = search_query[:-1]
+                selected = 0
             elif ch == curses.KEY_UP or ch == ord("k"):
-                filtered, _ = get_filtered_models()
-                if filtered and len(filtered) > 1:
-                    selected = max(0, selected - 1)
+                selected = max(0, selected - 1)
             elif ch == curses.KEY_DOWN or ch == ord("j"):
-                filtered, _ = get_filtered_models()
-                if filtered and len(filtered) > 1:
-                    selected = min(len(filtered) - 1, selected + 1)
+                selected = min(len(filtered) - 1, selected + 1)
             elif 32 <= ch < 127:
                 search_query += chr(ch)
                 selected = 0
 
-        elif ch == ord("q"):
+        elif ch == ord("q") or ch == 27:
             break
-        elif ch in (curses.KEY_UP, ord("k")):
-            if models:
-                filtered, _ = get_filtered_models()
-                if filtered:
-                    selected = max(0, selected - 1)
-        elif ch in (curses.KEY_DOWN, ord("j")):
-            if models:
-                filtered, _ = get_filtered_models()
-                if filtered:
-                    selected = min(len(filtered) - 1, selected + 1)
-        elif ch == curses.KEY_RESIZE:
-            pass
+        elif ch == curses.KEY_UP or ch == ord("k"):
+            selected = max(0, selected - 1)
+        elif ch == curses.KEY_DOWN or ch == ord("j"):
+            selected = min(len(filtered) - 1, selected + 1)
         elif ch == ord("/"):
             search_mode = True
             search_query = ""
         elif ch == ord("s"):
-            cycle_sort()
-            draw()
+            sort_mode_index = (sort_mode_index + 1) % len(SORT_MODES)
+            name_fn, _ = SORT_MODES[sort_mode_index]
+            direction = "largest first" if name_fn == "size" else ""
+            status_msg = f"Sort: {name_fn} ({direction})" if direction else f"Sort: {name_fn}"
+            status_time = time.time()
         elif ch == ord("o"):
             server_options_screen(stdscr, cfg)
             new_host = get_current_server(cfg)
             if new_host != host:
                 host = new_host
-                status_msg = f"Switched to {host}"
-                status_time = time.time()
                 selected = 0
-                models = []
-                loaded_instance_ids = set()
                 refresh_state()
-        elif ch == 10 or ch == 13:
-            if models and not loading:
-                target = models[selected]
-                model_key = target.get("key", target.get("id", "unknown"))
-                model_name = format_model_name(target)
-                loading = True
-                status_msg = f"Loading {model_name}..."
-                status_time = time.time()
-                draw()
-                try:
-                    load_model(host, model_key)
-                    loaded_instance_ids.add(model_key)
-                    status_msg = f"Loaded {model_name}"
-                except ConnectionError as e:
-                    status_msg = f"Load failed: {e}"
-                finally:
-                    loading = False
-                    status_time = time.time()
+        elif ch in (10, 13):
+            if filtered and not loading:
+                do_load(filtered[selected])
         elif ch == ord("u"):
             if not loading and loaded_instance_ids:
                 loading = True
                 status_msg = "Unloading model..."
                 status_time = time.time()
-                draw()
+                draw(filtered)
                 try:
                     instance_id = next(iter(loaded_instance_ids))
                     unload_model(host, instance_id)
@@ -635,11 +582,7 @@ def main(stdscr, host):
                 finally:
                     loading = False
                     status_time = time.time()
-        else:
-            pass
-
-        refresh_state()
-        draw()
+                refresh_state()
 
 
 if __name__ == "__main__":
