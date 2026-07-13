@@ -6,7 +6,7 @@ A terminal UI to browse, load, and unload models from a local LM Studio server.
 
 Controls:
   Up/Down / k/j   Scroll model list
-  Enter           Load the selected model
+  Enter           Load the selected model (ignored if already loaded)
   Double-click    Load / unload the clicked model (single click selects)
   /               Live search models
   s               Toggle sort (name/size)
@@ -479,6 +479,11 @@ def main(stdscr, host):
         nonlocal loading, status_msg, status_time
         model_key = target.get("key", target.get("id", "unknown"))
         model_name = format_model_name(target)
+        if target.get("loaded_instances"):
+            # A second load would spawn another instance (key:2) needing its own unload
+            status_msg = f"{model_name} is already loaded"
+            status_time = time.time()
+            return
         loading = True
         status_msg = f"Loading {model_name}..."
         status_time = time.time()
