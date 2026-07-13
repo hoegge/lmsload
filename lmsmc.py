@@ -339,6 +339,10 @@ def server_options_screen(stdscr, cfg):
 def main(stdscr, host):
     curses.curs_set(0)
     stdscr.nodelay(False)
+    try:
+        curses.set_escdelay(25)  # make a bare Esc register quickly
+    except AttributeError:  # Python < 3.9
+        pass
 
     help_line = "[/] Search  [s] Sort  [o] Servers  [Up/Down] Scroll  [Enter] Load  [u] Unload  [q/Esc] Quit"
 
