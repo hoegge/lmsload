@@ -445,12 +445,18 @@ def main(stdscr, host):
                     line = f"{prefix} {name}  {size}"
 
                     if idx == selected:
-                        stdscr.attron(curses.color_pair(5) | curses.A_BOLD)
+                        selected_pair = 9 if is_loaded else 5
+                        selected_attr = curses.color_pair(selected_pair)
+                        if not is_loaded:
+                            selected_attr |= curses.A_BOLD
+                        stdscr.attron(selected_attr)
                     elif is_loaded:
                         stdscr.attron(curses.color_pair(6) | curses.A_BOLD)
                     stdscr.addnstr(row, 1, line, w - 3)
-                    if idx == selected or is_loaded:
-                        stdscr.attroff(curses.color_pair(5 if idx == selected else 6) | curses.A_BOLD)
+                    if idx == selected:
+                        stdscr.attroff(selected_attr)
+                    elif is_loaded:
+                        stdscr.attroff(curses.color_pair(6) | curses.A_BOLD)
 
                     # Capability badges
                     caps = format_capabilities(m)
@@ -539,6 +545,7 @@ def main(stdscr, host):
     curses.init_pair(6, curses.COLOR_GREEN, -1)
     curses.init_pair(7, curses.COLOR_YELLOW, -1)
     curses.init_pair(8, curses.COLOR_MAGENTA, -1)
+    curses.init_pair(9, curses.COLOR_BLACK, curses.COLOR_GREEN)
 
     curses.mousemask(curses.BUTTON1_CLICKED | curses.BUTTON1_DOUBLE_CLICKED)
     curses.mouseinterval(400)  # max ms between clicks of a double-click
