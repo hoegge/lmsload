@@ -16,8 +16,11 @@ python lmsload.py
 
 ```bash
 # Connect to a custom server
-python lmsload.py --host http://192.168.1.100:1234
+python lmsload.py -h 192.168.1.100:1234
 ```
+
+Use `--help` to display command-line help. `--host` remains available as the
+long form of `-h`.
 
 ```bash
 # Debug mode (print API responses before launching TUI)

@@ -76,6 +76,14 @@ SORT_MODES = [
 DEFAULT_SORT_INDEX = 0
 
 
+def normalize_server_url(host):
+    """Add the default HTTP scheme and remove a trailing slash."""
+    host = host.strip()
+    if "://" not in host:
+        host = f"http://{host}"
+    return host.rstrip("/")
+
+
 def fetch_models(base_url):
     """Return (model_list, loaded_instance_ids) from the v1 API."""
     data = api_get(base_url, "/api/v1/models")
@@ -369,8 +377,10 @@ def main(stdscr, host):
     # Load server config
     cfg = load_config()
     current_host = get_current_server(cfg)
-    if host == DEFAULT_HOST:
+    if host is None:
         host = current_host
+    else:
+        host = normalize_server_url(host)
 
     def get_filtered():
         """Return filtered/sorted model list."""
@@ -683,11 +693,21 @@ def main(stdscr, host):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="lmsload - LM Studio Model Loader")
+    parser = argparse.ArgumentParser(
+        description="lmsload - LM Studio Model Loader",
+        add_help=False,
+    )
     parser.add_argument(
+        "--help",
+        action="help",
+        help="Show this help message and exit",
+    )
+    parser.add_argument(
+        "-h",
         "--host",
-        default=DEFAULT_HOST,
-        help=f"LM Studio server URL (default: {DEFAULT_HOST})",
+        default=None,
+        metavar="HOST",
+        help="LM Studio server address (default: configured server)",
     )
     parser.add_argument(
         "--debug",
@@ -698,7 +718,8 @@ if __name__ == "__main__":
 
     if args.debug:
         try:
-            models, loaded_id = fetch_models(args.host)
+            debug_host = normalize_server_url(args.host) if args.host else get_current_server(load_config())
+            models, loaded_id = fetch_models(debug_host)
             print(f"Models API returned {len(models)} models:")
             for m in models:
                 print(f"  {m}")
