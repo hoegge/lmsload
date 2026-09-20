@@ -20,6 +20,8 @@ Server settings stored in ~/.config/lmsload/config.yaml
 import argparse
 import curses
 import os
+import queue
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -343,8 +345,11 @@ def server_options_screen(stdscr, cfg):
 def main(stdscr, host):
     curses.curs_set(0)
     stdscr.nodelay(False)
+    stdscr.keypad(True)
     try:
-        curses.set_escdelay(25)  # make a bare Esc register quickly
+        # Arrow keys arrive as multi-byte escape sequences. A very short delay
+        # intermittently splits them, especially through tmux or SSH.
+        curses.set_escdelay(250)
     except AttributeError:  # Python < 3.9
         pass
 
@@ -540,8 +545,52 @@ def main(stdscr, host):
 
     refresh_state()
     last_refresh = time.time()
+    refresh_results = queue.Queue()
+    refresh_in_progress = False
+
+    def start_background_refresh():
+        """Fetch server state without blocking keyboard input."""
+        nonlocal refresh_in_progress
+        if refresh_in_progress:
+            return
+
+        refresh_host = host
+        refresh_in_progress = True
+
+        def worker():
+            try:
+                result = fetch_models(refresh_host)
+                refresh_results.put((refresh_host, result, None))
+            except ConnectionError as e:
+                refresh_results.put((refresh_host, None, e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def apply_background_refresh():
+        """Apply completed refreshes on the curses thread."""
+        nonlocal models, loaded_instance_ids, status_msg, status_time
+        nonlocal refresh_in_progress
+        try:
+            refresh_host, result, error = refresh_results.get_nowait()
+        except queue.Empty:
+            return
+
+        refresh_in_progress = False
+        if refresh_host != host:
+            return
+        if error is not None:
+            status_msg = f"Error: {error}"
+            status_time = time.time()
+            models = []
+        else:
+            models, loaded_instance_ids = result
 
     while True:
+        apply_background_refresh()
+        if time.time() - last_refresh > 5:
+            start_background_refresh()
+            last_refresh = time.time()
+
         filtered = get_filtered()
         if filtered:
             selected = max(0, min(selected, len(filtered) - 1))
@@ -552,10 +601,6 @@ def main(stdscr, host):
         ch = stdscr.getch()
 
         if ch == -1:
-            # Idle tick: periodically pick up load/unload changes from the server
-            if time.time() - last_refresh > 5:
-                refresh_state()
-                last_refresh = time.time()
             continue
 
         if ch == curses.KEY_MOUSE:
